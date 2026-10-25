@@ -18,6 +18,7 @@ import android.os.Build;
 import android.os.Bundle;
 import android.text.TextUtils;
 import android.util.Log;
+import android.util.Pair;
 import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.KeyEvent;
@@ -67,10 +68,14 @@ import net.gsantner.opoc.frontend.settings.GsFontPreferenceCompat;
 import net.gsantner.opoc.frontend.textview.TextViewUndoRedo;
 import net.gsantner.opoc.util.GsContextUtils;
 import net.gsantner.opoc.util.GsCoolExperimentalStuff;
+import net.gsantner.opoc.util.GsFileUtils;
 import net.gsantner.opoc.web.GsWebViewChromeClient;
 import net.gsantner.opoc.wrapper.GsTextWatcherAdapter;
 
 import java.io.File;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
 
 @SuppressWarnings({"UnusedReturnValue"})
 @SuppressLint("NonConstantResourceId")
@@ -78,6 +83,8 @@ public class DocumentEditAndViewFragment extends MarkorBaseFragment implements F
     public static final String FRAGMENT_TAG = "DocumentEditAndViewFragment";
     public static final String SAVESTATE_DOCUMENT = "DOCUMENT";
     public static final String START_PREVIEW = "START_PREVIEW";
+
+    private static final String AUTO_TITLE_MARKER = "autotitle: true";
 
     public static float VIEW_FONT_SCALE = 100f / 15.7f;
 
@@ -938,6 +945,8 @@ public class DocumentEditAndViewFragment extends MarkorBaseFragment implements F
             return false;
         }
 
+        applyAutoTitleFromFirstLine();
+
         // Document is written iff writeable && content has changed
         final CharSequence text = _hlEditor.getText();
         if (!_document.isContentSame(text)) {
@@ -957,6 +966,118 @@ public class DocumentEditAndViewFragment extends MarkorBaseFragment implements F
         } else {
             return true; // Report success if text not changed
         }
+    }
+
+    private boolean applyAutoTitleFromFirstLine() {
+        final CharSequence text = _hlEditor.getText();
+        if (text == null) {
+            return false;
+        }
+
+        final Pair<String, String> update = getAutoTitleUpdate(text.toString());
+        if (update == null) {
+            return false;
+        }
+
+        final String newTitle = update.first;
+        if (TextUtils.isEmpty(newTitle)) {
+            return false;
+        }
+
+        final String newFileName = GsFileUtils.getFilteredFilenameWithoutDisallowedChars(newTitle + _document.getFileExtension());
+        if (TextUtils.isEmpty(newFileName)) {
+            return false;
+        }
+
+        final File newFile = new File(_document.file.getParentFile(), newFileName);
+        final boolean needsRename = !_document.file.getAbsolutePath().equals(newFile.getAbsolutePath());
+        if (needsRename && !GsFileUtils.renameFile(_document.file, newFile)) {
+            return false;
+        }
+
+        if (!update.second.contentEquals(text)) {
+            final int[] selection = TextViewUtils.getSelection(_hlEditor);
+            _hlEditor.withAutoFormatDisabled(() -> _hlEditor.setTextKeepState(update.second));
+            if (selection[0] >= 0) {
+                TextViewUtils.setSelectionAndShow(_hlEditor, selection);
+            }
+        }
+
+        if (needsRename) {
+            _document = new Document(newFile);
+            _document.setFormat(_format.getFormatId());
+            _format.getActions().setDocument(_document);
+            _appSettings.setDocumentFormat(_document.path, _format.getFormatId());
+            final Activity activity = getActivity();
+            if (activity instanceof DocumentActivity) {
+                ((DocumentActivity) activity).setDocumentTitle(_document.title);
+            }
+        }
+
+        return true;
+    }
+
+    private Pair<String, String> getAutoTitleUpdate(final String text) {
+        final String[] rawLines = text.split("\n", -1);
+        if (rawLines.length < 2 || !"---".equals(rawLines[0].trim())) {
+            return null;
+        }
+
+        int endIndex = -1;
+        for (int i = 1; i < rawLines.length; i++) {
+            if ("---".equals(rawLines[i].trim())) {
+                endIndex = i;
+                break;
+            }
+        }
+
+        if (endIndex == -1) {
+            return null;
+        }
+
+        boolean hasAutoTitle = false;
+        int titleIndex = -1;
+        for (int i = 1; i < endIndex; i++) {
+            final String trimmed = rawLines[i].trim();
+            if (AUTO_TITLE_MARKER.equals(trimmed)) {
+                hasAutoTitle = true;
+            }
+            if (trimmed.startsWith("title:")) {
+                titleIndex = i;
+            }
+        }
+
+        if (!hasAutoTitle || titleIndex == -1) {
+            return null;
+        }
+
+        final String currentTitle = rawLines[titleIndex].substring(rawLines[titleIndex].indexOf(':') + 1).trim();
+        if (!currentTitle.isEmpty() && !"\"\"".equals(currentTitle) && !"''".equals(currentTitle)) {
+            return null;
+        }
+
+        String firstLine = null;
+        for (int i = endIndex + 1; i < rawLines.length; i++) {
+            if (!rawLines[i].trim().isEmpty()) {
+                firstLine = rawLines[i].trim();
+                break;
+            }
+        }
+
+        if (firstLine == null) {
+            return null;
+        }
+
+        final String escapedTitle = firstLine.replace("\"", "\\\"");
+        final List<String> lines = new ArrayList<>(Arrays.asList(rawLines));
+        lines.set(titleIndex, "title: \"" + escapedTitle + "\"");
+        for (int i = endIndex - 1; i >= 1; i--) {
+            if (AUTO_TITLE_MARKER.equals(lines.get(i).trim())) {
+                lines.remove(i);
+            }
+        }
+
+        return Pair.create(firstLine, TextUtils.join("\n", lines));
     }
 
     private boolean isDisplayedAtMainActivity() {
